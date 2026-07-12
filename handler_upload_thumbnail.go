@@ -1,10 +1,12 @@
 package main
 
 import (
-	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -46,16 +48,23 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	mediaType := header.Header.Get("Content-Type")
-
-	imageData, err := io.ReadAll(file)
+	contentType := header.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to read data", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
 		return
 	}
 
-	imageDataStr := base64.StdEncoding.EncodeToString(imageData)
-	dataUrl := fmt.Sprintf("data:%v;base64,%v", mediaType, imageDataStr)
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Thumbnail must be jpeg or png", err)
+		return
+	}
+
+	exts, err := mime.ExtensionsByType(mediaType)
+	if err != nil || len(exts) == 0 {
+		respondWithError(w, http.StatusBadRequest, "Unsupported content type", err)
+		return
+	}
 
 	videoMetaData, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -68,12 +77,59 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	videoMetaData.ThumbnailURL = &dataUrl
+	fileName := videoID.String() + exts[0]
+	filePath := filepath.Join(cfg.assetsRoot, fileName)
+
+	dst, err := os.Create(filePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to create file", err)
+		return
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to save file", err)
+		return
+	}
+
+	thumbnailUrl := "/assets/" + fileName
+	videoMetaData.ThumbnailURL = &thumbnailUrl
 
 	if err := cfg.db.UpdateVideo(videoMetaData); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
+		respondWithError(w, http.StatusInternalServerError, "Unbale to update video", err)
 		return
 	}
 
 	respondWithJSON(w, http.StatusOK, videoMetaData)
+
+	/* Bad practice
+	*CPU performance: Base64 encoding is an expensive CPU-intensive operation. If we have a lot of uploads (I mean, we're planning on being a successful company, right?), we'll have some scaling issues.
+	Storage costs: Base64 encoding bloats the size of the image data. We're using more disk space than we need to, which again, is expensive and slow.
+	Database performance: Databases (especially relational databases like SQLite, Postgres and MySQL) are optimized for small, structured data, not giant blobs of binary. It will impact query performance in a non-trivial way.
+	Caching: Base64 encoded images aren't as cache friendly as raw files, meaning slower load times and higher bandwidth costs.
+		imageDataStr := base64.StdEncoding.EncodeToString(imageData)
+			dataUrl := fmt.Sprintf("data:%v;base64,%v", mediaType, imageDataStr)
+
+			videoMetaData, err := cfg.db.GetVideo(videoID)
+			if err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Unable to get video data from sql", err)
+				return
+			}
+
+			if videoMetaData.UserID != userID {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+
+			videoMetaData.ThumbnailURL = &dataUrl
+
+			if err := cfg.db.UpdateVideo(videoMetaData); err != nil {
+				respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
+				return
+			}
+
+			respondWithJSON(w, http.StatusOK, videoMetaData)
+	*/
+
 }
