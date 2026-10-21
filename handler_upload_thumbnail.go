@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -34,9 +36,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
 	const maxMemory = 10 << 20
-	r.ParseMultipartForm(maxMemory)
+	if err := r.ParseMultipartForm(maxMemory); err != nil {
+		respondWithError(w, http.StatusBadRequest, "unable to parse multipart form", err)
+		return
+	}
 
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
@@ -47,7 +51,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
-		respondWithError(w, http.StatusBadRequest, "media type is empty", err)
+		respondWithError(w, http.StatusBadRequest, "media type is empty", nil)
 		return
 	}
 
@@ -62,8 +66,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	extensions, err := mime.ExtensionsByType(contentType)
-
+	extensions, err := mime.ExtensionsByType(mediaType)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to convert mime type", err)
 		return
@@ -72,11 +75,28 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "unsupported file type", nil)
 		return
 	}
-
 	extension := extensions[0]
 
-	fileName := videoID.String() + extension
+	// Check the video and ownership before writing anything to disk
+	videoData, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "unable to get video", err)
+		return
+	}
+	if videoData.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "not video owner", nil)
+		return
+	}
 
+	// Random file name: 32 random bytes -> base64 URL-safe string
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "unable to generate random file name", err)
+		return
+	}
+	randomName := base64.RawURLEncoding.EncodeToString(randomBytes)
+
+	fileName := randomName + extension
 	path := filepath.Join(cfg.assetsRoot, fileName)
 
 	destination, err := os.Create(path)
@@ -88,17 +108,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	if _, err := io.Copy(destination, file); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "unable to copy multipart file to new file on disk", err)
-		return
-	}
-
-	videoData, err := cfg.db.GetVideo(videoID)
-	if err != nil {
-		respondWithError(w, http.StatusNotFound, "unable to get video", err)
-		return
-	}
-
-	if videoData.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "not video owner", err)
 		return
 	}
 
